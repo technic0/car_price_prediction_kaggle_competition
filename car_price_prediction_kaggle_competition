@@ -1,0 +1,435 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Car Price Prediction for Kaggle\n",
+    "\n",
+    "### **Project Overview**\n",
+    "\n",
+    "The goal of this project is to predict the price of used cars based on a variety of their features. This notebook details the process from data loading and cleaning to feature engineering and, finally, model training and evaluation. The project follows an iterative approach, starting with a baseline model and progressively adding features and experimenting with different algorithms to improve prediction accuracy.\n",
+    "\n",
+    "### **Table of Contents**\n",
+    "1.  [Setup and Imports](#1.-Setup-and-Imports)\n",
+    "2.  [Data Loading and Initial Exploration](#2.-Data-Loading-and-Initial-Exploration)\n",
+    "3.  [Feature Engineering](#3.-Feature-Engineering)\n",
+    "4.  [Modeling and Experimentation](#4.-Modeling-and-Experimentation)\n",
+    "5.  [Final Model Training and Submission](#5.-Final-Model-Training-and-Submission)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 1. Setup and Imports\n",
+    "\n",
+    "First, we'll import the necessary libraries for data manipulation, modeling, and visualization. We are also setting some `pandas` options for better display of dataframes.\n",
+    "\n",
+    "The `eli5` library is used for inspecting machine learning models. If it's not installed in your environment, the following cell will handle the installation."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Standard libraries for data analysis\n",
+    "import pandas as pd\n",
+    "import numpy as np\n",
+    "import re\n",
+    "\n",
+    "# Visualization libraries\n",
+    "import matplotlib.pyplot as plt\n",
+    "import seaborn as sns\n",
+    "\n",
+    "# Machine Learning models\n",
+    "import xgboost as xgb\n",
+    "import catboost as cb\n",
+    "\n",
+    "# Scikit-learn utilities\n",
+    "from sklearn.model_selection import KFold\n",
+    "from sklearn.metrics import mean_absolute_error\n",
+    "\n",
+    "# Library for inspecting ML models\n",
+    "try:\n",
+    "    import eli5\n",
+    "except ImportError:\n",
+    "    !pip install -q eli5\n",
+    "    import eli5\n",
+    "from eli5.sklearn import PermutationImportance\n",
+    "\n",
+    "\n",
+    "# Display options\n",
+    "pd.set_option('display.max_columns', 500)\n",
+    "pd.set_option('display.float_format', lambda x: '%.3f' % x)\n",
+    "\n",
+    "print(\"Libraries imported successfully!\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 2. Data Loading and Initial Exploration\n",
+    "\n",
+    "We'll load the training and testing datasets. These are provided in HDF5 format. After loading, we will combine them into a single DataFrame to ensure that feature engineering is applied consistently across both datasets."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Load the training and test data\n",
+    "# !!! IMPORTANT !!!\n",
+    "# Replace 'path/to/your/df.train.h5' and 'path/to/your/df.test.h5' with the actual file paths.\n",
+    "df_train = pd.read_hdf('df.train.h5')\n",
+    "df_test = pd.read_hdf('df.test.h5')\n",
+    "\n",
+    "\n",
+    "# Combine the dataframes for consistent processing\n",
+    "df = pd.concat([df_train, df_test], ignore_index=True)\n",
+    "\n",
+    "print(\"Training data shape:\", df_train.shape)\n",
+    "print(\"Test data shape:\", df_test.shape)\n",
+    "print(\"Combined data shape:\", df.shape)\n",
+    "\n",
+    "df.head()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The target variable, `price_value`, is currently stored as a string with currency information. We need to clean this to have a numerical format for our regression model. We will also take the logarithm of the price, which is a common practice for right-skewed target variables like price, helping the model to perform better."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Function to parse the price string into a numeric format\n",
+    "def parse_price(price_str):\n",
+    "    if isinstance(price_str, str):\n",
+    "        return float(price_str.replace('PLN', '').replace(' ', '').replace(',', '.'))\n",
+    "    return float(price_str)\n",
+    "\n",
+    "# Apply the parsing function\n",
+    "df['price_value'] = df['price_value'].apply(parse_price)\n",
+    "\n",
+    "# Log-transform the target variable to handle skewness\n",
+    "df['price_value_log'] = np.log1p(df['price_value'])\n",
+    "\n",
+    "# Visualize the distribution of the original and log-transformed price\n",
+    "plt.figure(figsize=(12, 5))\n",
+    "\n",
+    "plt.subplot(1, 2, 1)\n",
+    "sns.histplot(df['price_value'], kde=True, bins=50)\n",
+    "plt.title('Distribution of Car Price')\n",
+    "\n",
+    "plt.subplot(1, 2, 2)\n",
+    "sns.histplot(df['price_value_log'], kde=True, bins=50)\n",
+    "plt.title('Distribution of Log-Transformed Car Price')\n",
+    "\n",
+    "plt.tight_layout()\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 3. Feature Engineering\n",
+    "\n",
+    "This is a crucial step where we create new features from the existing data to help our model learn better."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Identify all categorical features\n",
+    "categorical_feats = [col for col in df.columns if '_cat' in col]\n",
+    "print(f\"Identified {len(categorical_feats)} categorical features: {categorical_feats}\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Feature Engineering for Year of Production\n",
+    "df[\"year_production\"] = df[\"Rok produkcji\"].astype(int)\n",
+    "df[\"year_production_ext\"] = df.apply(lambda x: x[\"year_production\"] if x[\"year_production\"] != -1 else int(x[\"Year\"]), axis=1)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Feature Engineering for Version\n",
+    "df[\"version_years\"] = df[\"Wersja\"].map(lambda x: re.findall(r'(\\d{4})-(\\d{4})?', str(x)))\n",
+    "df[\"version_year_from\"] = df[\"version_years\"].map(lambda x: int(x[0][0]) if x else -1)\n",
+    "df[\"version_year_to\"] = df[\"version_years\"].map(lambda x: int(x[0][1]) if x and x[0][1] != \"\" else -1)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Function to remove outliers by capping at a given percentile\n",
+    "def cap_outliers(series, percentile=99):\n",
+    "    cut_value = np.percentile(series[series.notna()], percentile)\n",
+    "    return series.map(lambda x: x if x < cut_value else cut_value)\n",
+    "\n",
+    "# Clean and process Engine Capacity\n",
+    "df['engine_capacity'] = df['Pojemność skokowa'].map(lambda x: int(str(x).split('cm3')[0].replace(' ', '')) if pd.notna(x) else -1)\n",
+    "df['engine_capacity_capped'] = cap_outliers(df['engine_capacity'])\n",
+    "\n",
+    "# Clean and process Horsepower\n",
+    "df['horse_power'] = df['Moc'].map(lambda x: int(str(x).split('KM')[0].replace(' ', '')) if pd.notna(x) else -1)\n",
+    "df['horse_power_capped'] = cap_outliers(df['horse_power'])\n",
+    "\n",
+    "# Clean and process Mileage\n",
+    "df[\"mileage\"] = df[\"Przebieg\"].map(lambda x: int(str(x).split(\"km\")[0].replace(\" \", \"\")) if pd.notna(x) else -1)\n",
+    "df[\"mileage_capped\"] = cap_outliers(df[\"mileage\"])\n",
+    "\n",
+    "# Visualize the distributions before and after capping\n",
+    "plt.figure(figsize=(18, 10))\n",
+    "\n",
+    "plt.subplot(2, 3, 1)\n",
+    "sns.histplot(df['engine_capacity'], bins=50, kde=True).set_title('Engine Capacity (Original)')\n",
+    "plt.subplot(2, 3, 2)\n",
+    "sns.histplot(df['horse_power'], bins=50, kde=True).set_title('Horse Power (Original)')\n",
+    "plt.subplot(2, 3, 3)\n",
+    "sns.histplot(df['mileage'], bins=50, kde=True).set_title('Mileage (Original)')\n",
+    "\n",
+    "plt.subplot(2, 3, 4)\n",
+    "sns.histplot(df['engine_capacity_capped'], bins=50, kde=True).set_title('Engine Capacity (Capped)')\n",
+    "plt.subplot(2, 3, 5)\n",
+    "sns.histplot(df['horse_power_capped'], bins=50, kde=True).set_title('Horse Power (Capped)')\n",
+    "plt.subplot(2, 3, 6)\n",
+    "sns.histplot(df['mileage_capped'], bins=50, kde=True).set_title('Mileage (Capped)')\n",
+    "\n",
+    "plt.tight_layout()\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Create binary feature for 'Serviced at ASO'\n",
+    "df['serviced_at_aso'] = df['Serwisowany w ASO'].apply(lambda x: 1 if x == 'Tak' else 0)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 4. Modeling and Experimentation\n",
+    "\n",
+    "With our features ready, we can now train and evaluate our models. We will use **CatBoost**, a powerful gradient boosting library that works well with categorical features."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Model training and evaluation function\n",
+    "def run_model(df, features, model):\n",
+    "    \"\"\"\n",
+    "    Trains and evaluates a given model using cross-validation.\n",
+    "    \n",
+    "    Args:\n",
+    "        df (pd.DataFrame): The input dataframe containing both train and test sets.\n",
+    "        features (list): A list of feature names to use for training.\n",
+    "        model: The machine learning model to train.\n",
+    "        \n",
+    "    Returns:\n",
+    "        tuple: A tuple containing the mean absolute error and its standard deviation.\n",
+    "    \"\"\"\n",
+    "    # Filter for training data only (where price is not null)\n",
+    "    train_df = df[df['price_value'].notna()].copy()\n",
+    "    \n",
+    "    X = train_df[features].values\n",
+    "    y = train_df['price_value_log'].values\n",
+    "    \n",
+    "    # Identify categorical feature indices for CatBoost\n",
+    "    cat_feature_indices = [i for i, feat in enumerate(features) if '_cat' in feat]\n",
+    "    \n",
+    "    scores = []\n",
+    "    \n",
+    "    # Cross-validation\n",
+    "    cv = KFold(n_splits=3, shuffle=True, random_state=42)\n",
+    "    for train_idx, test_idx in cv.split(X):\n",
+    "        X_train, X_test = X[train_idx], X[test_idx]\n",
+    "        y_train, y_test = y[train_idx], y[test_idx]\n",
+    "\n",
+    "        if isinstance(model, cb.CatBoostRegressor):\n",
+    "            model.fit(X_train, y_train, cat_features=cat_feature_indices, eval_set=(X_test, y_test), verbose=0, early_stopping_rounds=50)\n",
+    "        else:\n",
+    "            model.fit(X_train, y_train)\n",
+    "\n",
+    "        y_pred = model.predict(X_test)\n",
+    "        y_pred = np.expm1(y_pred) # Inverse log-transform\n",
+    "        y_test_exp = np.expm1(y_test)\n",
+    "        \n",
+    "        score = mean_absolute_error(y_test_exp, y_pred)\n",
+    "        scores.append(score)\n",
+    "        \n",
+    "    return np.mean(scores), np.std(scores)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Experiment 1: Baseline with basic features\n",
+    "print(\"Running Experiment 1...\")\n",
+    "feats_v1 = [\"year_production_ext\", \"version_year_from\", \"version_year_to\"] + categorical_feats\n",
+    "model = cb.CatBoostRegressor(loss_function=\"RMSE\", random_state=42, verbose=0)\n",
+    "mae, std = run_model(df, feats_v1, model)\n",
+    "print(f\"Baseline MAE: {mae:.2f} (+/- {std:.2f})\\n\")\n",
+    "\n",
+    "# Experiment 2: Adding cleaned numerical features\n",
+    "print(\"Running Experiment 2...\")\n",
+    "feats_v2 = feats_v1 + ['engine_capacity_capped', 'horse_power_capped', 'mileage_capped']\n",
+    "model = cb.CatBoostRegressor(loss_function=\"RMSE\", random_state=42, verbose=0)\n",
+    "mae, std = run_model(df, feats_v2, model)\n",
+    "print(f\"MAE with numerical features: {mae:.2f} (+/- {std:.2f})\\n\")\n",
+    "\n",
+    "# Experiment 3: Adding the binary ASO feature\n",
+    "print(\"Running Experiment 3...\")\n",
+    "feats_v3 = feats_v2 + ['serviced_at_aso']\n",
+    "model = cb.CatBoostRegressor(loss_function=\"RMSE\", random_state=42, verbose=0)\n",
+    "mae, std = run_model(df, feats_v3, model)\n",
+    "print(f\"MAE with ASO feature: {mae:.2f} (+/- {std:.2f})\\n\")\n",
+    "\n",
+    "# Experiment 4: Hyperparameter Tuning\n",
+    "print(\"Running Experiment 4...\")\n",
+    "feats_final = feats_v3 # Use the best feature set so far\n",
+    "tuned_model = cb.CatBoostRegressor(\n",
+    "    loss_function=\"RMSE\", \n",
+    "    random_state=42, \n",
+    "    verbose=0,\n",
+    "    iterations=5000,\n",
+    "    learning_rate=0.03\n",
+    ")\n",
+    "mae, std = run_model(df, feats_final, tuned_model)\n",
+    "print(f\"MAE with tuned CatBoost: {mae:.2f} (+/- {std:.2f})\\n\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 5. Final Model Training and Submission\n",
+    "\n",
+    "Now, we train our final, tuned model on the entire training dataset and make predictions on the test set for submission to Kaggle."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Prepare the final feature set\n",
+    "final_features = feats_v3\n",
+    "cat_feature_indices = [i for i, feat in enumerate(final_features) if '_cat' in feat]\n",
+    "\n",
+    "# Separate the training and test data\n",
+    "df_train_final = df[df['price_value'].notna()]\n",
+    "df_test_final = df[df['price_value'].isna()]\n",
+    "\n",
+    "X_train = df_train_final[final_features].values\n",
+    "y_train = df_train_final['price_value_log'].values\n",
+    "X_test = df_test_final[final_features].values\n",
+    "\n",
+    "# Initialize and train the final model\n",
+    "final_model = cb.CatBoostRegressor(\n",
+    "    loss_function=\"RMSE\",\n",
+    "    random_state=42,\n",
+    "    iterations=15000,\n",
+    "    learning_rate=0.03,\n",
+    "    verbose=1000\n",
+    ")\n",
+    "\n",
+    "print(\"Training final model...\")\n",
+    "final_model.fit(X_train, y_train, cat_features=cat_feature_indices)\n",
+    "\n",
+    "# Make predictions on the test data\n",
+    "print(\"\\nMaking predictions...\")\n",
+    "predictions_log = final_model.predict(X_test)\n",
+    "predictions = np.expm1(predictions_log)\n",
+    "\n",
+    "# Create the submission file\n",
+    "print(\"Creating submission file...\")\n",
+    "submission = df_test_final[['id']].copy()\n",
+    "submission['price'] = predictions\n",
+    "submission.to_csv('submission.csv', index=False)\n",
+    "\n",
+    "print(\"\\nSubmission file 'submission.csv' created successfully!\")\n",
+    "submission.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Display feature importances\n",
+    "feature_importances = pd.DataFrame(\n",
+    "    {'feature': final_features, 'importance': final_model.get_feature_importance()}\n",
+    ").sort_values('importance', ascending=False)\n",
+    "\n",
+    "plt.figure(figsize=(10, 15))\n",
+    "sns.barplot(x='importance', y='feature', data=feature_importances)\n",
+    "plt.title('Feature Importances from Final CatBoost Model')\n",
+    "plt.tight_layout()\n",
+    "plt.show()"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.8.8"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
