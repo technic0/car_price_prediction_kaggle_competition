@@ -2,6 +2,8 @@
 
 ![Car Banner](https://placehold.co/1200x400/334155/e2e8f0?text=Car+Price+Prediction)
 
+URL: https://www.kaggle.com/competitions/masterclass3-predict-car-price/
+
 ## 🏆 Key Achievement: 4th Place out of 72 Teams 🏆
 
 This project represents a successful entry into a Kaggle competition focused on predicting the prices of used cars. Through a systematic approach of feature engineering, model selection, and iterative improvement, **this solution achieved 4th place on the final leaderboard**, placing it in the top 5% of all submissions.
